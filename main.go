@@ -17,6 +17,8 @@ import (
 	"io"
 	"io/ioutil"
 	"encoding/base64"
+	"fmt"
+	"time"
 )
 
 var receivers map[string]string
@@ -100,9 +102,8 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 	log.Printf("Received mail host: %s from: '%s' for '%s' with subject '%s'", origin.String(), from, to[0], subject)
 
 	body := new(bytes.Buffer)
-	body.WriteString("*")
-	body.WriteString(subject)
-	body.WriteString("*\n")
+	body.WriteString(fmt.Sprintf("*%s* (%s)\n", subject, time.Now().Format(time.RFC1123Z)))
+
 	file := new(bytes.Buffer)
 
 	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
@@ -181,15 +182,14 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 	if file.Len() > 0 {
 		fb := tgbotapi.FileBytes{Name: "report.html", Bytes: file.Bytes()}
 		tgMsg := tgbotapi.NewDocumentUpload(i, fb)
-		tgMsg.Caption = subject
+		tgMsg.Caption = fmt.Sprintf("%s\n%s", subject, time.Now().Format(time.RFC1123Z))
 		//log.Printf("File: %q",fb.Bytes)
 		_, err = bot.Send(tgMsg)
 		if err != nil {
 			log.Printf("[ERROR]: Send document: %s", err.Error())
 		}
 	}else {
-		bodyStr := body.String()
-		tgMsg := tgbotapi.NewMessage(i, bodyStr)
+		tgMsg := tgbotapi.NewMessage(i, body.String())
 		tgMsg.ParseMode = tgbotapi.ModeMarkdown
 		_, err = bot.Send(tgMsg)
 		if err != nil {
