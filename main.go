@@ -147,7 +147,18 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 		}
 	} else {
 		if strings.HasPrefix(mediaType, "text/html") {
-			file.ReadFrom(msg.Body)
+			pbytes, err := ioutil.ReadAll(msg.Body)
+			if err != nil {
+				log.Printf("Read body error: %s", err.Error())
+			}
+			pencode := msg.Header.Get("Content-Transfer-Encoding")
+			if pencode == "base64" {
+				pbytes, err = base64.StdEncoding.DecodeString(string(pbytes))
+				if err != nil {
+					log.Printf("Can not decode from base64: %s", err.Error())
+				}
+			}
+			file.Write(pbytes)
 		}else {
 			body.ReadFrom(msg.Body)
 		}
