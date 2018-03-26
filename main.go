@@ -12,11 +12,11 @@ import (
 	"gopkg.in/telegram-bot-api.v4"
 	"github.com/spf13/viper"
 	"./smtpd"
-	"github.com/jaytaylor/html2text"
 	"mime"
 	"mime/multipart"
 	"io"
 	"io/ioutil"
+	"encoding/base64"
 )
 
 var receivers map[string]string
@@ -32,17 +32,17 @@ func main() {
 	// Load & parse config
 	viper.SetConfigFile(*configFilePath)
 	err := viper.ReadInConfig()
-	if ( err != nil ) {
+	if err != nil {
 		log.Fatal(err.Error())
 	}
 
 	// Logging
 	logfile := viper.GetString("logging.file")
-	if ( logfile == "" ) {
+	if logfile == "" {
 		log.Println("No logging.file defined in config, outputting to stdout")
 	} else {
 		lf, err := os.OpenFile(logfile, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0666)
-		if ( err != nil ) {
+		if err != nil {
 			log.Fatal(err.Error())
 		}
 		log.SetOutput(lf)
@@ -52,36 +52,36 @@ func main() {
 	debug = viper.GetBool("logging.debug")
 
 	receivers = viper.GetStringMapString("receivers")
-	if ( receivers["*"] == "" ) {
+	if receivers["*"] == "" {
 		log.Fatal("No wildcard receiver (*) found in config.")
 	}
 
-	var token string = viper.GetString("bot.token")
-	if ( token == "" ) {
+	var token = viper.GetString("bot.token")
+	if token == "" {
 		log.Fatal("No bot.token defined in config")
 	}
 
-	var listen string = viper.GetString("smtp.listen")
-	var name string = viper.GetString("smtp.name")
-	if ( listen == "" ) {
+	var listen = viper.GetString("smtp.listen")
+	var name = viper.GetString("smtp.name")
+	if listen == "" {
 		log.Fatal("No smtp.listen defined in config.")
 	}
-	if ( name == "" ) {
+	if name == "" {
 		log.Fatal("No smtp.name defined in config.")
 	}
 
 	// Initialize TG bot
 	bot, err = tgbotapi.NewBotAPI(token)
-	if ( err != nil ) {
+	if err != nil {
 		log.Fatal(err.Error())
 	}
 	log.Printf("Bot authorized as %s", bot.Self.UserName)
 
 	log.Printf("Initializing smtp server on %s...", listen)
 	// Initialize SMTP server
-	err_ := smtpd.ListenAndServe(listen, mailHandler, "mail2tg", "", debug)
-	if ( err_ != nil ) {
-		log.Fatal(err_.Error())
+	err = smtpd.ListenAndServe(listen, mailHandler, "mail2tg", "", debug)
+	if err != nil {
+		log.Fatal(err.Error())
 	}
 }
 
@@ -92,17 +92,18 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 	to[0] = strings.Trim(to[0], "<")
 	to[0] = strings.Trim(to[0], ">")
 	msg, err := mail.ReadMessage(bytes.NewReader(data))
-	if ( err != nil ) {
+	if err != nil {
 		log.Printf("[MAIL ERROR]: %s", err.Error())
 		return
 	}
 	subject := msg.Header.Get("Subject")
-	log.Printf("Received mail from '%s' for '%s' with subject '%s'", from, to[0], subject)
+	log.Printf("Received mail host: %s from: '%s' for '%s' with subject '%s'", origin.String(), from, to[0], subject)
 
 	body := new(bytes.Buffer)
 	body.WriteString("*")
 	body.WriteString(subject)
 	body.WriteString("*\n")
+	file := new(bytes.Buffer)
 
 	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
 	if err != nil {
@@ -117,39 +118,43 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 			}
 			ptype := p.Header.Get("Content-Type")
 			log.Printf("PTYPE: %s", ptype)
-
 			if strings.HasPrefix(ptype, "text/html") {
 				if err != nil {
 					log.Printf("[MAIL ERROR]: %s", err.Error())
 					continue
+
 				}
 				log.Print("Convert HTML part to markdown")
-				pbytes, err := ioutil.ReadAll(p)
 				if err != nil {
 					log.Printf("Part read error: %s", err.Error())
 					continue
 				}
-				ptext, err := html2text.FromString(string(pbytes), html2text.Options{PrettyTables: true})
+				pbytes, err := ioutil.ReadAll(p)
 				if err != nil {
-					log.Printf("Convert error: %s", err.Error())
+					log.Printf("Read part error: %s", err.Error())
 					continue
 				}
-				log.Printf("Ptext: %s",ptext)
-				body.WriteString("```")
-				body.WriteString(ptext)
-				body.WriteString("```")
+				pencode := p.Header.Get("Content-Transfer-Encoding")
+				if pencode == "base64" {
+					pbytes, err = base64.StdEncoding.DecodeString(string(pbytes))
+					if err != nil {
+						log.Printf("Can not decode from base64: %s", err.Error())
+						continue
+					}
+				}
+				file.Write(pbytes)
 			}
 		}
 	} else {
-		body.ReadFrom(msg.Body)
+		if strings.HasPrefix(mediaType, "text/html") {
+			file.ReadFrom(msg.Body)
+		}else {
+			body.ReadFrom(msg.Body)
+		}
 	}
-
-	bodyStr := body.String()
-	log.Printf("Converted Body: %s", bodyStr)
-
 	// Find receivers and send to TG
 	var tgid string
-	if ( receivers[to[0]] != "" ) {
+	if receivers[to[0]] != "" {
 		tgid = receivers[to[0]]
 	} else {
 		tgid = receivers["*"]
@@ -158,12 +163,26 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 	log.Printf("Relaying message to: %v", tgid)
 
 	i, err := strconv.ParseInt(tgid, 10, 64)
-	if ( err != nil ) {
+	if err != nil {
 		log.Printf("[ERROR]: wrong telegram id: not int64")
 		return
 	}
-
-	tgMsg := tgbotapi.NewMessage(i, bodyStr)
-	tgMsg.ParseMode = tgbotapi.ModeMarkdown
-	bot.Send(tgMsg)
+	if file.Len() > 0 {
+		fb := tgbotapi.FileBytes{Name: "report.html", Bytes: file.Bytes()}
+		tgMsg := tgbotapi.NewDocumentUpload(i, fb)
+		tgMsg.Caption = subject
+		//log.Printf("File: %q",fb.Bytes)
+		_, err = bot.Send(tgMsg)
+		if err != nil {
+			log.Printf("[ERROR]: Send document: %s", err.Error())
+		}
+	}else {
+		bodyStr := body.String()
+		tgMsg := tgbotapi.NewMessage(i, bodyStr)
+		tgMsg.ParseMode = tgbotapi.ModeMarkdown
+		_, err = bot.Send(tgMsg)
+		if err != nil {
+			log.Printf("[ERROR]: Send message: %s", err.Error())
+		}
+	}
 }
