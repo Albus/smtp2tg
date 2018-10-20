@@ -17,8 +17,10 @@ import (
 	"io"
 	"io/ioutil"
 	"encoding/base64"
-	"fmt"
 	"time"
+	"mime/quotedprintable"
+	"fmt"
+	"golang.org/x/text/encoding/charmap"
 )
 
 var receivers map[string]string
@@ -81,7 +83,7 @@ func main() {
 
 	log.Printf("Initializing smtp server on %s...", listen)
 	// Initialize SMTP server
-	err = smtpd.ListenAndServe(listen, mailHandler, "mail2tg", "", debug)
+	err = smtpd.ListenAndServe(listen, mailHandler, "mail2tg", name, debug)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -98,15 +100,21 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 		log.Printf("[MAIL ERROR]: %s", err.Error())
 		return
 	}
-	subject := msg.Header.Get("Subject")
+	dec := new(mime.WordDecoder)
+	subject, err := dec.DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil {
+		log.Printf("[MAIL ERROR]: %s", err.Error())
+		subject = msg.Header.Get("Subject")
+	}
 	log.Printf("Received mail host: %s from: '%s' for '%s' with subject '%s'", origin.String(), from, to[0], subject)
 
 	body := new(bytes.Buffer)
 	body.WriteString(fmt.Sprintf("*%s* (%s)\n", subject, time.Now().Format(time.RFC1123Z)))
 
 	file := new(bytes.Buffer)
-
-	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	ct := msg.Header.Get("Content-Type")
+	log.Printf("[MAIL INFO]: %s", ct)
+	mediaType, params, err := mime.ParseMediaType(ct)
 	if err != nil {
 		log.Printf("[MAIL ERROR]: %s", err.Error())
 	}
@@ -142,6 +150,12 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 						log.Printf("Can not decode from base64: %s", err.Error())
 						continue
 					}
+				}else if pencode == "quoted-printable" {
+					pbytes, err = ioutil.ReadAll(quotedprintable.NewReader(msg.Body))
+					if err != nil {
+						log.Printf("Can not decode from quoted-printable: %s", err.Error())
+						continue
+					}
 				}
 				file.Write(pbytes)
 			}
@@ -158,12 +172,40 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 				if err != nil {
 					log.Printf("Can not decode from base64: %s", err.Error())
 				}
+			}else if pencode == "quoted-printable" {
+				pbytes, err = ioutil.ReadAll(quotedprintable.NewReader(msg.Body))
+				if err != nil {
+					log.Printf("Can not decode from quoted-printable: %s", err.Error())
+				}
 			}
 			file.Write(pbytes)
 		}else {
-			body.ReadFrom(msg.Body)
+			bbytes, err := ioutil.ReadAll(msg.Body)
+			if err != nil {
+				log.Printf("Read body error: %s", err.Error())
+			}else {
+				if len(bbytes) > 900 {
+					log.Printf("Body lenght (%d) greater then 900",len(bbytes))
+					if strings.Contains(subject, "Sentinel") {
+						bbytes, err = ioutil.ReadAll(charmap.Windows1251.NewDecoder().Reader(bytes.NewReader(bbytes)))
+						if err != nil {
+							log.Printf("Read body error: %s", err.Error())
+						}
+					}
+					file.Write(bbytes)
+				} else {
+					if strings.Contains(subject, "Sentinel") {
+						body.ReadFrom(charmap.Windows1251.NewDecoder().Reader(bytes.NewReader(bbytes)))
+						body.WriteString("\r\n")
+					} else {
+						body.ReadFrom(bytes.NewReader(bbytes))
+					}
+				}
+			}
 		}
 	}
+	log.Printf("Body lenght: %d",body.Len())
+	//log.Printf("Body: %s", body.String())
 	// Find receivers and send to TG
 	var tgid string
 	if receivers[to[0]] != "" {
@@ -180,7 +222,12 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 		return
 	}
 	if file.Len() > 0 {
-		fb := tgbotapi.FileBytes{Name: "report.html", Bytes: file.Bytes()}
+		var  fb  tgbotapi.FileBytes
+		if strings.Contains(subject, "Sentinel"){
+			fb = tgbotapi.FileBytes{Name: "report.txt", Bytes: file.Bytes()}
+		}else{
+			fb = tgbotapi.FileBytes{Name: "report.html", Bytes: file.Bytes()}
+		}
 		tgMsg := tgbotapi.NewDocumentUpload(i, fb)
 		tgMsg.Caption = fmt.Sprintf("%s\n%s", subject, time.Now().Format(time.RFC1123Z))
 		//log.Printf("File: %q",fb.Bytes)
