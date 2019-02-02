@@ -11,7 +11,7 @@ import (
 	"net/mail"
 	"gopkg.in/telegram-bot-api.v4"
 	"github.com/spf13/viper"
-	"./smtpd"
+	"github.com/Albus/smtp2tg/smtpd"
 	"mime"
 	"mime/multipart"
 	"io"
@@ -229,7 +229,7 @@ func mailHandler(origin net.Addr, from string, to []string, data []byte) {
 			fb = tgbotapi.FileBytes{Name: "report.html", Bytes: file.Bytes()}
 		}
 		tgMsg := tgbotapi.NewDocumentUpload(i, fb)
-		tgMsg.Caption = fmt.Sprintf("%s\n%s", subject, time.Now().Format(time.RFC1123Z))
+		tgMsg.Caption = subject //fmt.Sprintf("%s\n%s", subject, time.Now().Format(time.RFC1123Z))
 		//log.Printf("File: %q",fb.Bytes)
 		_, err = bot.Send(tgMsg)
 		if err != nil {
